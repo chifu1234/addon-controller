@@ -636,6 +636,7 @@ var _ = Describe("HandlersUtils", func() {
 		resourceReports, err := controllers.DeployContent(context.TODO(), false,
 			testEnv.Config, testEnv.Client,
 			secret, map[string]string{"service": services}, clusterSummary, nil,
+			"",
 			textlogger.NewLogger(textlogger.NewConfig()))
 		Expect(err).To(BeNil())
 		By("Validating action for all resourceReports is Create")
@@ -665,7 +666,7 @@ var _ = Describe("HandlersUtils", func() {
 		// ( if the ClusterProfile were to be changed from DryRun, nothing would happen).
 		resourceReports, err = controllers.DeployContent(context.TODO(), false,
 			testEnv.Config, testEnv.Client,
-			secret, map[string]string{"service": services}, clusterSummary, nil,
+			secret, map[string]string{"service": services}, clusterSummary, nil, "",
 			textlogger.NewLogger(textlogger.NewConfig()))
 		Expect(err).To(BeNil())
 		By("Validating action for all resourceReports is NoAction")
@@ -703,7 +704,7 @@ var _ = Describe("HandlersUtils", func() {
 		// (if the ClusterProfile were to be changed from DryRun, both service would be updated).
 		resourceReports, err = controllers.DeployContent(context.TODO(), false,
 			testEnv.Config, testEnv.Client,
-			secret, map[string]string{"service": newContent}, clusterSummary, nil,
+			secret, map[string]string{"service": newContent}, clusterSummary, nil, "",
 			textlogger.NewLogger(textlogger.NewConfig()))
 		Expect(err).To(BeNil())
 		By("Validating action for all resourceReports is Update")
@@ -714,7 +715,7 @@ var _ = Describe("HandlersUtils", func() {
 		tmpSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: randomString(), Name: randomString()}}
 		resourceReports, err = controllers.DeployContent(context.TODO(), false,
 			testEnv.Config, testEnv.Client, tmpSecret, map[string]string{"service": services},
-			clusterSummary, nil, textlogger.NewLogger(textlogger.NewConfig()))
+			clusterSummary, nil, "", textlogger.NewLogger(textlogger.NewConfig()))
 		Expect(err).To(BeNil())
 		By("Validating action for all resourceReports is Conflict")
 		validateResourceReports(resourceReports, 0, 0, 0, 2)

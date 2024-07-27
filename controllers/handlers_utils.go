@@ -110,9 +110,10 @@ func deployContentOfConfigMap(ctx context.Context, deployingToMgmtCluster bool, 
 	destClient client.Client, configMap *corev1.ConfigMap, clusterSummary *configv1beta1.ClusterSummary,
 	mgmtResources map[string]*unstructured.Unstructured, logger logr.Logger,
 ) ([]configv1beta1.ResourceReport, error) {
-
+	subressources := configMap.GetObjectMeta().GetLabels()["subressources"]
+	logger.Info("hi subressources " + subressources)
 	return deployContent(ctx, deployingToMgmtCluster, destConfig, destClient, configMap, configMap.Data,
-		clusterSummary, mgmtResources, logger)
+		clusterSummary, mgmtResources, subressources, logger)
 }
 
 // deployContentOfSecret deploys policies contained in a Secret.
@@ -130,7 +131,7 @@ func deployContentOfSecret(ctx context.Context, deployingToMgmtCluster bool, des
 	}
 
 	return deployContent(ctx, deployingToMgmtCluster, destConfig, destClient, secret, data,
-		clusterSummary, mgmtResources, logger)
+		clusterSummary, mgmtResources, "", logger)
 }
 
 func deployContentOfSource(ctx context.Context, deployingToMgmtCluster bool, destConfig *rest.Config,
@@ -177,7 +178,7 @@ func deployContentOfSource(ctx context.Context, deployingToMgmtCluster bool, des
 	}
 
 	return deployContent(ctx, deployingToMgmtCluster, destConfig, destClient, source, content,
-		clusterSummary, mgmtResources, logger)
+		clusterSummary, mgmtResources, "", logger)
 }
 
 func readFiles(dir string) (map[string]string, error) {
@@ -202,7 +203,7 @@ func readFiles(dir string) (map[string]string, error) {
 // updateResource creates or updates a resource in a CAPI Cluster.
 // No action in DryRun mode.
 func updateResource(ctx context.Context, dr dynamic.ResourceInterface,
-	clusterSummary *configv1beta1.ClusterSummary, object *unstructured.Unstructured,
+	clusterSummary *configv1beta1.ClusterSummary, object *unstructured.Unstructured, subressources string,
 	logger logr.Logger) error {
 
 	// No-op in DryRun mode
@@ -213,19 +214,54 @@ func updateResource(ctx context.Context, dr dynamic.ResourceInterface,
 	l := logger.WithValues("resourceNamespace", object.GetNamespace(),
 		"resourceName", object.GetName(), "resourceGVK", object.GetObjectKind().GroupVersionKind())
 	l.V(logs.LogDebug).Info("deploying policy")
-
-	data, err := runtime.Encode(unstructured.UnstructuredJSONScheme, object)
+	var (
+		data []byte
+		err  error
+	)
+	object, options, patchType, name, err := getSubRessource(object, subressources)
+	if err != nil {
+		return err
+	}
+	data, err = runtime.Encode(unstructured.UnstructuredJSONScheme, object)
 	if err != nil {
 		return err
 	}
 
-	forceConflict := true
-	options := metav1.PatchOptions{
-		FieldManager: "application/apply-patch",
-		Force:        &forceConflict,
-	}
-	_, err = dr.Patch(ctx, object.GetName(), types.ApplyPatchType, data, options)
+	logger.Info(fmt.Sprintf("data=%v", string(data)))
+	logger.Info(subressources)
+	unst, err := dr.Patch(ctx, name, patchType, data, options, []string{subressources}...)
+	logger.Info(fmt.Sprintf("unst=%v obj=%v, patch=%v, data=%v, options=%v, resou=%v, err=%v", unst, object.GetName(), patchType, string(data), options, []string{subressources}, err))
+
+	//unst, err := dr.Patch(ctx, object.GetName(), types.StrategicMergePatchType, data, metav1.PatchOptions{}, []string{subressources}...)
+	//unst, err := dr.Patch(ctx, object.GetName(), types.MergePatchType, data, metav1.PatchOptions{}, subressources)
 	return err
+}
+
+func getSubRessource(object *unstructured.Unstructured, subressources string) (*unstructured.Unstructured, metav1.PatchOptions, types.PatchType, string, error) {
+	name := object.GetName()
+	force := true
+	if subressources == "" {
+		return object, metav1.PatchOptions{
+			FieldManager: "application/apply-patch",
+			Force:        &force,
+		}, types.ApplyPatchType, name, nil
+	}
+
+	subResourceContent, found, err := unstructured.NestedMap(object.UnstructuredContent(), subressources)
+	if err != nil {
+		return nil, metav1.PatchOptions{}, types.StrategicMergePatchType, name, err
+	}
+	if !found {
+		return nil, metav1.PatchOptions{}, types.StrategicMergePatchType, name, fmt.Errorf("subresource %s not found", subressources)
+	}
+
+	subResourceObject := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			subressources: subResourceContent,
+		},
+	}
+	return subResourceObject, metav1.PatchOptions{}, types.StrategicMergePatchType, name, nil
+
 }
 
 func instantiateTemplate(referencedObject client.Object, logger logr.Logger) bool {
@@ -249,9 +285,9 @@ func instantiateTemplate(referencedObject client.Object, logger logr.Logger) boo
 // and kind.group::name for cluster wide policies.
 func deployContent(ctx context.Context, deployingToMgmtCluster bool, destConfig *rest.Config, destClient client.Client,
 	referencedObject client.Object, data map[string]string, clusterSummary *configv1beta1.ClusterSummary,
-	mgmtResources map[string]*unstructured.Unstructured, logger logr.Logger,
+	mgmtResources map[string]*unstructured.Unstructured, subressources string, logger logr.Logger,
 ) (reports []configv1beta1.ResourceReport, err error) {
-
+	logger.Info("deployContent")
 	instantiateTemplate := instantiateTemplate(referencedObject, logger)
 	resources, err := collectContent(ctx, clusterSummary, mgmtResources, data, instantiateTemplate, logger)
 	if err != nil {
@@ -265,7 +301,7 @@ func deployContent(ctx context.Context, deployingToMgmtCluster bool, destConfig 
 	}
 
 	return deployUnstructured(ctx, deployingToMgmtCluster, destConfig, destClient, resources, ref,
-		configv1beta1.FeatureResources, clusterSummary, mgmtResources, logger)
+		configv1beta1.FeatureResources, clusterSummary, mgmtResources, subressources, logger)
 }
 
 // adjustNamespace fixes namespace.
@@ -298,13 +334,14 @@ func adjustNamespace(policy *unstructured.Unstructured, destConfig *rest.Config)
 //nolint:funlen // requires a lot of arguments because kustomize and plain resources are using this function
 func deployUnstructured(ctx context.Context, deployingToMgmtCluster bool, destConfig *rest.Config,
 	destClient client.Client, referencedUnstructured []*unstructured.Unstructured, referencedObject *corev1.ObjectReference,
-	featureID configv1beta1.FeatureID, clusterSummary *configv1beta1.ClusterSummary, mgmtResources map[string]*unstructured.Unstructured, logger logr.Logger,
+	featureID configv1beta1.FeatureID, clusterSummary *configv1beta1.ClusterSummary, mgmtResources map[string]*unstructured.Unstructured, subressources string, logger logr.Logger,
 ) (reports []configv1beta1.ResourceReport, err error) {
-
+	logger.Info("deployUnstructured")
 	profile, profileTier, err := configv1beta1.GetProfileOwnerAndTier(ctx, getManagementClusterClient(), clusterSummary)
 	if err != nil {
 		return nil, err
 	}
+	logger.Info(fmt.Sprintf("deployUnstructured, %v, %v", profile.GetObjectKind().GroupVersionKind().Kind, configv1beta1.ProfileKind))
 	if profile.GetObjectKind().GroupVersionKind().Kind == configv1beta1.ProfileKind {
 		profile.SetName(profileNameToOwnerReferenceName(profile))
 	}
@@ -313,6 +350,7 @@ func deployUnstructured(ctx context.Context, deployingToMgmtCluster bool, destCo
 	if err != nil {
 		return nil, err
 	}
+	logger.Info(fmt.Sprintf("deployUnstructured, patch %v, %v", patches, len(patches)))
 
 	if len(patches) > 0 {
 		p := &patcher.CustomPatchPostRenderer{Patches: patches}
@@ -325,8 +363,9 @@ func deployUnstructured(ctx context.Context, deployingToMgmtCluster bool, destCo
 	conflictErrorMsg := ""
 	reports = make([]configv1beta1.ResourceReport, 0)
 	for i := range referencedUnstructured {
-		policy := referencedUnstructured[i]
 
+		policy := referencedUnstructured[i]
+		logger.Info(fmt.Sprintf("deployUnstructured, patch %v", policy))
 		err := adjustNamespace(policy, destConfig)
 		if err != nil {
 			return nil, err
@@ -393,7 +432,7 @@ func deployUnstructured(ctx context.Context, deployingToMgmtCluster bool, destCo
 			}
 		}
 
-		err = updateResource(ctx, dr, clusterSummary, policy, logger)
+		err = updateResource(ctx, dr, clusterSummary, policy, subressources, logger)
 		if err != nil {
 			return reports, err
 		}
